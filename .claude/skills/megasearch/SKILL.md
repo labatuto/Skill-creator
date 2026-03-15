@@ -15,20 +15,29 @@ Parse for `--format` flag: `briefing` (default), `conversational`, or `bullet`.
 
 ---
 
-## PHASE 0: Complexity Triage
+## PHASE 0: Triage & Environment Check
 
-Before anything else, classify the query:
+### 0a. WebFetch Probe
+
+Before anything else, test whether WebFetch works in this environment by fetching a known-good URL (e.g., `https://en.wikipedia.org/wiki/Main_Page`).
+
+- **If it succeeds** → full mode. Sub-agents will use both WebSearch and WebFetch.
+- **If it returns 403 or fails** → **search-only mode**. This typically means the environment has an egress proxy with a host allowlist that blocks general web access. WebSearch still works (it goes through an API), but WebFetch will fail on all general URLs. Set `WEBFETCH_AVAILABLE = false` and propagate this to all sub-agents.
+
+### 0b. Complexity Classification
+
+Classify the query:
 
 **Simple** (single fact, well-known topic, likely answered by 1-2 searches):
-→ Skip to a streamlined path: do 2 searches, verify the answer across sources, output with citations. No sub-agents needed.
+→ Streamlined path: 2 searches, verify across sources, output with citations. No sub-agents.
 
-**Moderate** (multi-faceted but well-documented topic, 2-4 sub-questions):
-→ Run Phases 1-7 but limit to 2-3 sub-agents, skip second pass.
+**Moderate** (multi-faceted but well-documented, 2-4 sub-questions):
+→ Phases 1-7 with 2-3 sub-agents. Skip second pass.
 
-**Deep** (complex, contested, multi-domain, or poorly-documented topic):
+**Deep** (complex, contested, multi-domain, or poorly-documented):
 → Full workflow with 3-6 sub-agents, second pass if needed.
 
-State your classification and reasoning in one sentence, then proceed accordingly.
+State your classification in one sentence, then proceed.
 
 ---
 
@@ -74,6 +83,11 @@ For each sub-question, determine:
 - What searches and source types would answer it
 - Priority: **high** (core question), **medium** (supporting), **low/high-variance** (long shot)
 
+**Before launching, prepare a context brief for each sub-agent:**
+- What the exploratory phase already established (so they don't re-search basics)
+- Which other sub-agents are covering adjacent topics (so they minimize overlap)
+- Whether WebFetch is available (from Phase 0a probe)
+
 Then launch sub-agents in parallel. Group low-priority vectors into a single agent.
 
 ---
@@ -82,12 +96,19 @@ Then launch sub-agents in parallel. Group low-priority vectors into a single age
 
 Launch sub-agents using `Agent` tool with `subagent_type: "general-purpose"`. Run all in a single message for parallelism.
 
-**Sub-agent prompt template:**
+**Choose the appropriate template based on Phase 0a:**
+
+### Template A: Full Mode (WebFetch available)
 
 ```
 You are a research sub-agent. Your findings will be combined with other agents' work.
 
 RESEARCH QUESTION: [specific sub-question]
+
+CONTEXT FROM EXPLORATORY PHASE:
+[2-3 sentences summarizing what's already known — don't re-search this]
+
+OTHER AGENTS ARE COVERING: [brief note on adjacent agents' topics to minimize overlap]
 
 SUGGESTED QUERIES (reformulate if needed):
 - [query 1]
@@ -104,9 +125,9 @@ QUERY FORMULATION RULES (critical — follow these strictly):
 
 RESEARCH INSTRUCTIONS:
 1. Run 3-5 searches using WebSearch (suggested + your own reformulations)
-2. Use WebFetch to read the 3-5 most promising results
+2. Use WebFetch to read the 3-5 most promising results in full
 3. Follow links when a source references key studies, documents, or data — go 1-2 hops deep on the most relevant
-4. If WebFetch fails (paywall, JS-only, 404), note it and move on — don't retry
+4. If WebFetch fails on a specific URL (paywall, JS-only, 404), note it and try the next URL — don't retry the same one
 5. For each source, extract per the format below
 
 OUTPUT FORMAT (follow exactly):
@@ -125,10 +146,66 @@ Then provide:
 - **Contradictions:** [any disagreements between sources]
 - **Gaps:** [what you looked for but couldn't find]
 
-BUDGET: Return at most 1500 words total. Prioritize quality over quantity.
+BUDGET: [High priority: 2000 words | Medium: 1200 words | Low/grouped: 800 words]
 ```
 
-**Adapt the template** per sub-question — change the research question, queries, and any specific source types to prioritize.
+### Template B: Search-Only Mode (WebFetch unavailable)
+
+```
+You are a research sub-agent. Your findings will be combined with other agents' work.
+
+IMPORTANT: WebFetch is NOT available in this environment (blocked by egress proxy). Do NOT attempt any WebFetch calls — they will all fail. Use ONLY WebSearch. To compensate, run more searches with more specific queries to extract detailed information from search snippets.
+
+RESEARCH QUESTION: [specific sub-question]
+
+CONTEXT FROM EXPLORATORY PHASE:
+[2-3 sentences summarizing what's already known — don't re-search this]
+
+OTHER AGENTS ARE COVERING: [brief note on adjacent agents' topics to minimize overlap]
+
+SUGGESTED QUERIES (reformulate if needed):
+- [query 1]
+- [query 2]
+
+QUERY FORMULATION RULES (critical — follow these strictly):
+- Search for words that would APPEAR ON THE TARGET PAGE, not your question about it
+- Use keyword clusters (3-5 terms): "CRISPR gene therapy FDA approval 2026" not "what's happening with gene editing?"
+- Use domain-specific jargon experts would use
+- Include the year for recency-sensitive topics
+- Never search for long exact phrases
+- Use site: operators for authoritative sources (site:arxiv.org, site:reuters.com, site:gov)
+- If a query returns poor results: broaden (remove specific terms), rephrase (try synonyms), or pivot (search for known experts/orgs)
+
+SEARCH-ONLY STRATEGY:
+Since you cannot read full pages, compensate with:
+1. Run 5-8 searches (more than normal) with varied, specific queries
+2. Use highly targeted queries to surface specific facts, quotes, and claims from search snippets
+3. For key claims, run verification searches: search for the specific claim + "study" or "source" or author name
+4. When a search snippet references another source, search for THAT source directly by title/author
+5. Extract as much as possible from the search result descriptions — they often contain key sentences from the page
+
+OUTPUT FORMAT (follow exactly):
+For each source, return:
+---
+**Source [N]:** [Title]
+- **URL:** [url]
+- **Author/Publication:** [who] | **Date:** [when]
+- **Type:** primary / secondary / tertiary / opinion
+- **Key claims:** [2-4 bullet points, use DIRECT QUOTES from search snippets where available]
+- **References:** [other sources mentioned in snippets that seem important]
+- **Access note:** [full text read / search snippet only]
+---
+
+Then provide:
+- **Summary:** [3-5 sentences synthesizing what you found]
+- **Contradictions:** [any disagreements between sources]
+- **Gaps:** [what you looked for but couldn't find]
+- **Fetch failures:** Do NOT list any — you were told not to try WebFetch.
+
+BUDGET: [High priority: 2000 words | Medium: 1200 words | Low/grouped: 800 words]
+```
+
+**Adapt the template** per sub-question — change the research question, context, queries, and budget.
 
 ---
 
@@ -141,7 +218,7 @@ Once sub-agents return, assess per sub-question:
 
 **Decision:**
 - Good coverage → proceed to Phase 6
-- Critical gaps → launch a targeted second pass (max 2-3 agents, only for genuine gaps)
+- Critical gaps → launch a targeted second pass (max 2-3 agents, only for genuine gaps). Pass first-round findings as context so second-pass agents build on prior work rather than starting fresh.
 - **Hard limit**: two passes maximum. After that, work with what you have and flag low-confidence areas.
 
 **Deduplicate**: If multiple agents found the same source, consolidate into one entry. Note which agents independently found it (independent discovery = higher confidence).

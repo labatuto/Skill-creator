@@ -19,10 +19,16 @@ Parse for `--format` flag: `briefing` (default), `conversational`, or `bullet`.
 
 ### 0a. WebFetch Probe
 
-Before anything else, test whether WebFetch works in this environment by fetching a known-good URL (e.g., `https://en.wikipedia.org/wiki/Main_Page`).
+Before anything else, test whether WebFetch works in this environment. Use a small, fast URL:
 
-- **If it succeeds** → full mode. Sub-agents will use both WebSearch and WebFetch.
-- **If it returns 403 or fails** → **search-only mode**. This typically means the environment has an egress proxy with a host allowlist that blocks general web access. WebSearch still works (it goes through an API), but WebFetch will fail on all general URLs. Set `WEBFETCH_AVAILABLE = false` and propagate this to all sub-agents.
+```
+WebFetch: url="https://httpbin.org/status/200", prompt="Does this page load successfully? Reply YES or NO."
+```
+
+- **If it succeeds (any 200-level response)** → **full mode**. Sub-agents will use both WebSearch and WebFetch.
+- **If it returns 403, times out, or fails for any reason** → **search-only mode**. This typically means the environment has an egress proxy that blocks general web access (common in remote/sandboxed Claude Code environments). WebSearch still works (it routes through an API), but WebFetch will fail on virtually all URLs. Set `WEBFETCH_AVAILABLE = false` and propagate this to every sub-agent.
+
+**Do NOT retry the probe.** One failure is sufficient to switch to search-only mode. Do NOT waste time on further WebFetch attempts — proceed immediately.
 
 ### 0b. Complexity Classification
 
@@ -86,9 +92,11 @@ For each sub-question, determine:
 **Before launching, prepare a context brief for each sub-agent:**
 - What the exploratory phase already established (so they don't re-search basics)
 - Which other sub-agents are covering adjacent topics (so they minimize overlap)
-- Whether WebFetch is available (from Phase 0a probe)
+- Whether WebFetch is available (from Phase 0a probe) — **this determines which template to use below**
 
 Then launch sub-agents in parallel. Group low-priority vectors into a single agent.
+
+**Template selection is mandatory:** If the Phase 0a probe failed, you MUST use Template B for ALL sub-agents. Do not mix templates.
 
 ---
 
@@ -154,7 +162,12 @@ BUDGET: [High priority: 2000 words | Medium: 1200 words | Low/grouped: 800 words
 ```
 You are a research sub-agent. Your findings will be combined with other agents' work.
 
-IMPORTANT: WebFetch is NOT available in this environment (blocked by egress proxy). Do NOT attempt any WebFetch calls — they will all fail. Use ONLY WebSearch. To compensate, run more searches with more specific queries to extract detailed information from search snippets.
+⚠️ CRITICAL: WebFetch is DISABLED — all calls WILL fail (egress proxy blocks general web access).
+Rules:
+- Do NOT call WebFetch at all — not even once, not even to "try"
+- Do NOT mention WebFetch failures in your output (you never attempted it)
+- Use ONLY WebSearch for all research
+- Compensate by running MORE searches (5-8) with highly specific queries to extract detailed information from search snippets
 
 RESEARCH QUESTION: [specific sub-question]
 
@@ -200,7 +213,7 @@ Then provide:
 - **Summary:** [3-5 sentences synthesizing what you found]
 - **Contradictions:** [any disagreements between sources]
 - **Gaps:** [what you looked for but couldn't find]
-- **Fetch failures:** Do NOT list any — you were told not to try WebFetch.
+- **Note:** All sources are from search snippets only (WebFetch disabled in this environment).
 
 BUDGET: [High priority: 2000 words | Medium: 1200 words | Low/grouped: 800 words]
 ```
